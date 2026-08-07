@@ -42,8 +42,8 @@ import net.runelite.client.ui.overlay.OverlayLayer;
  * <pre>
  *   result = opacity * icon + (1 - opacity) * scene
  * </pre>
- * Pixels the icon did not touch are identical in both images and therefore
- * unchanged, so over-covering the icon with a generous region is harmless.
+ * The native sprite is matched inside each captured lane, so only prayer
+ * pixels are erased and redrawn.
  */
 class PrayerTransparencyApplyOverlay extends Overlay
 {
@@ -97,7 +97,8 @@ class PrayerTransparencyApplyOverlay extends Overlay
 
 		for (HeadIconRegion region : regions)
 		{
-			eraseAndRedraw(pixels, bufferWidth, bufferHeight, scratch, region, alpha, inverseAlpha, gpu);
+			eraseAndRedraw(plugin, pixels, bufferWidth, bufferHeight, scratch, region,
+				alpha, inverseAlpha, gpu);
 		}
 
 		regions.clear();
@@ -110,8 +111,8 @@ class PrayerTransparencyApplyOverlay extends Overlay
 	 * <p>
 	 * Three passes so the original and target regions can overlap safely:
 	 * <ol>
-	 *   <li>detect the icon pixels (anything differing from the captured scene)
-	 *       from the untouched buffer, storing them and a 0/1 mask</li>
+	 *   <li>detect native icon pixels from the untouched buffer, storing them
+	 *       and a 0/1 mask</li>
 	 *   <li>erase: restore the captured scene over the original location</li>
 	 *   <li>redraw: write the icon pixels at the target location, blended with
 	 *       the captured target scene (software) or premultiplied with an alpha
@@ -120,7 +121,8 @@ class PrayerTransparencyApplyOverlay extends Overlay
 	 *
 	 * @return the number of icon pixels handled
 	 */
-	private static int eraseAndRedraw(int[] pixels, int bufferWidth, int bufferHeight, int[] scratch,
+	private static int eraseAndRedraw(PrayerTransparencyPlugin plugin, int[] pixels,
+		int bufferWidth, int bufferHeight, int[] scratch,
 		HeadIconRegion region, int alpha, int inverseAlpha, boolean gpu)
 	{
 		int x0 = region.getX();
@@ -154,17 +156,45 @@ class PrayerTransparencyApplyOverlay extends Overlay
 		{
 			return 0;
 		}
+		MatchResult match = findNativeIcon(pixels, bufferWidth, scratch, region, width, height);
+		String debugKey = "match-" + region.getPlayerName() + '-' + region.getHeadIcon();
+		if (!match.accepted)
+		{
+			plugin.debugEvery(debugKey,
+				"match rejected: player={}, icon={}, bestTop={}, screenY={}, exact={}, changed={}, opaque={}, ratio={}%, lane=({},{} {}x{}), sprite={}x{}",
+				region.getPlayerName(), region.getHeadIcon(), match.top,
+				match.top < 0 ? -1 : region.getY() + match.top, match.matches, match.changed,
+				match.opaque, match.ratio(), region.getX(), region.getY(), width, height,
+				region.getNativeIcon().getWidth(), region.getNativeIcon().getHeight());
+			return 0;
+		}
+		int nativeTop = match.top;
+		net.runelite.api.SpritePixels nativeIcon = region.getNativeIcon();
+		int nativeWidth = nativeIcon.getWidth();
+		int nativeHeight = nativeIcon.getHeight();
+		int nativeSourceX = x0 - (region.getIconX() - nativeIcon.getMaxWidth() / 2
+			+ nativeIcon.getOffsetX());
+		int[] nativePixels = nativeIcon.getPixels();
 
-		// Pass 1: detect icon pixels from the untouched buffer.
+		// GPU compositing can transform native sprite RGB values. Once the matcher
+		// has verified the sprite shape, accept every changed opaque sprite pixel.
 		for (int row = 0; row < height; row++)
 		{
 			int dest = (y0 + row) * bufferWidth + x0;
 			int slot = row * width;
 			for (int column = 0; column < width; column++, dest++, slot++)
 			{
+				int spriteX = nativeSourceX + column;
+				int spriteY = row - nativeTop;
+				if (spriteX < 0 || spriteX >= nativeWidth || spriteY < 0 || spriteY >= nativeHeight)
+				{
+					scratch[maskOffset + slot] = 0;
+					continue;
+				}
+				int nativePixel = nativePixels[spriteY * nativeWidth + spriteX];
 				int current = pixels[dest];
 				int background = scratch[origBgOffset + slot];
-				if (current == background)
+				if (nativePixel == 0 || current == background)
 				{
 					scratch[maskOffset + slot] = 0;
 					continue;
@@ -246,7 +276,100 @@ class PrayerTransparencyApplyOverlay extends Overlay
 			}
 		}
 
+		plugin.debugEvery(debugKey,
+			"match accepted: player={}, icon={}, top={}, screenY={}, exact={}, changed={}, opaque={}, ratio={}%, touched={}, alpha={}, style={}, gpu={}",
+			region.getPlayerName(), region.getHeadIcon(), nativeTop, region.getY() + nativeTop,
+			match.matches, match.changed, match.opaque, match.ratio(), touched, alpha,
+			region.getCleanIcon() == null ? "GAME" : "CLEAN", gpu);
 		return touched;
+	}
+
+	private static MatchResult findNativeIcon(int[] pixels, int bufferWidth, int[] scratch,
+		HeadIconRegion region, int width, int height)
+	{
+		net.runelite.api.SpritePixels sprite = region.getNativeIcon();
+		int spriteWidth = sprite.getWidth();
+		int spriteHeight = sprite.getHeight();
+		int[] spritePixels = sprite.getPixels();
+		int sourceX = region.getX() - (region.getIconX() - sprite.getMaxWidth() / 2
+			+ sprite.getOffsetX());
+		int opaque = 0;
+		for (int row = 0; row < spriteHeight; row++)
+		{
+			for (int column = 0; column < width; column++)
+			{
+				int spriteX = sourceX + column;
+				if (spriteX >= 0 && spriteX < spriteWidth
+					&& spritePixels[row * spriteWidth + spriteX] != 0)
+				{
+					opaque++;
+				}
+			}
+		}
+
+		int bestTop = -1;
+		int bestMatches = 0;
+		int bestChanged = 0;
+		for (int top = 0; top + spriteHeight <= height; top++)
+		{
+			int matches = 0;
+			int changed = 0;
+			for (int row = 0; row < spriteHeight; row++)
+			{
+				int bufferIndex = (region.getY() + top + row) * bufferWidth + region.getX();
+				int scratchIndex = region.getOrigBgOffset() + (top + row) * width;
+				for (int column = 0; column < width; column++, bufferIndex++, scratchIndex++)
+				{
+					int spriteX = sourceX + column;
+					if (spriteX < 0 || spriteX >= spriteWidth)
+					{
+						continue;
+					}
+					int spritePixel = spritePixels[row * spriteWidth + spriteX];
+					int current = pixels[bufferIndex];
+					if (spritePixel != 0 && current != scratch[scratchIndex])
+					{
+						changed++;
+						if ((current & 0xFFFFFF) == (spritePixel & 0xFFFFFF))
+						{
+							matches++;
+						}
+					}
+				}
+			}
+			if (matches > bestMatches)
+			{
+				bestMatches = matches;
+				bestChanged = changed;
+				bestTop = top;
+			}
+		}
+		return new MatchResult(bestTop, bestMatches, bestChanged, opaque,
+			bestMatches >= 8 && bestMatches * 5 >= opaque
+				&& bestChanged * 10 >= opaque * 9);
+	}
+
+	private static final class MatchResult
+	{
+		private final int top;
+		private final int matches;
+		private final int changed;
+		private final int opaque;
+		private final boolean accepted;
+
+		private MatchResult(int top, int matches, int changed, int opaque, boolean accepted)
+		{
+			this.top = top;
+			this.matches = matches;
+			this.changed = changed;
+			this.opaque = opaque;
+			this.accepted = accepted;
+		}
+
+		private int ratio()
+		{
+			return opaque == 0 ? 0 : matches * 100 / opaque;
+		}
 	}
 
 	/**
@@ -254,10 +377,8 @@ class PrayerTransparencyApplyOverlay extends Overlay
 	 * position of the game's icon, scaled uniformly to the icon's on-screen
 	 * size, with the configured transparency.
 	 * <p>
-	 * The icon's extent is measured from a central band of the (tall) region
-	 * only - the game also draws overhead text below the icon between the two
-	 * callbacks, which would otherwise stretch the measured bounding box
-	 * vertically and squash the sprite.
+	 * The mask contains only pixels that exactly matched the native prayer
+	 * sprite, excluding overhead text, names and health bars.
 	 */
 	private static void drawCleanIcon(int[] pixels, int bufferWidth, int bufferHeight, int[] scratch,
 		HeadIconRegion region, int alpha, int inverseAlpha, boolean gpu)
@@ -278,18 +399,12 @@ class PrayerTransparencyApplyOverlay extends Overlay
 			return;
 		}
 
-		// Measure the icon's on-screen extent from a band around the region
-		// center. The band is deliberately narrow so overhead text drawn below
-		// the icon does not inflate the height.
-		int bandHalf = Math.min(56, height / 2);
-		int regionCenterY = height / 2;
+		// Measure the icon's on-screen extent from the (already icon-only) mask.
+		// The blob refinement in eraseAndRedraw removed overhead text, names and
+		// health bars, so the full mask is exactly the icon.
 		int minX = width, minY = height, maxX = -1, maxY = -1;
-		for (int row = regionCenterY - bandHalf; row <= regionCenterY + bandHalf; row++)
+		for (int row = 0; row < height; row++)
 		{
-			if (row < 0 || row >= height)
-			{
-				continue;
-			}
 			int slot = row * width;
 			for (int column = 0; column < width; column++, slot++)
 			{

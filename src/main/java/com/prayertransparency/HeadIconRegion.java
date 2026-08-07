@@ -25,6 +25,7 @@
 package com.prayertransparency;
 
 import javax.annotation.Nullable;
+import net.runelite.api.HeadIcon;
 import net.runelite.api.SpritePixels;
 
 /**
@@ -52,10 +53,18 @@ class HeadIconRegion
 	 */
 	private final int targetX;
 	private final int targetY;
+	/**
+	 * Unclamped horizontal actor anchor used by the native renderer.
+	 */
+	private final int iconX;
 	private final int origBgOffset;
 	private final int targetBgOffset;
 	private final int iconOffset;
 	private final int maskOffset;
+	private final int eraseMaskOffset;
+	private final SpritePixels nativeIcon;
+	private final HeadIcon headIcon;
+	private final String playerName;
 	/**
 	 * Optional clean prayer book sprite to draw instead of the game's icon
 	 * (which includes the beige overhead circle). Null = draw the captured
@@ -65,8 +74,9 @@ class HeadIconRegion
 	private final SpritePixels cleanIcon;
 
 	HeadIconRegion(int x, int y, int width, int height, int targetX, int targetY,
-		int origBgOffset, int targetBgOffset, int iconOffset, int maskOffset,
-		@Nullable SpritePixels cleanIcon)
+		int iconX, int origBgOffset, int targetBgOffset, int iconOffset, int maskOffset,
+		int eraseMaskOffset,
+		SpritePixels nativeIcon, HeadIcon headIcon, String playerName, @Nullable SpritePixels cleanIcon)
 	{
 		this.x = x;
 		this.y = y;
@@ -74,10 +84,15 @@ class HeadIconRegion
 		this.height = height;
 		this.targetX = targetX;
 		this.targetY = targetY;
+		this.iconX = iconX;
 		this.origBgOffset = origBgOffset;
 		this.targetBgOffset = targetBgOffset;
 		this.iconOffset = iconOffset;
 		this.maskOffset = maskOffset;
+		this.eraseMaskOffset = eraseMaskOffset;
+		this.nativeIcon = nativeIcon;
+		this.headIcon = headIcon;
+		this.playerName = playerName;
 		this.cleanIcon = cleanIcon;
 	}
 
@@ -111,6 +126,11 @@ class HeadIconRegion
 		return targetY;
 	}
 
+	int getIconX()
+	{
+		return iconX;
+	}
+
 	int getOrigBgOffset()
 	{
 		return origBgOffset;
@@ -129,6 +149,26 @@ class HeadIconRegion
 	int getMaskOffset()
 	{
 		return maskOffset;
+	}
+
+	int getEraseMaskOffset()
+	{
+		return eraseMaskOffset;
+	}
+
+	SpritePixels getNativeIcon()
+	{
+		return nativeIcon;
+	}
+
+	HeadIcon getHeadIcon()
+	{
+		return headIcon;
+	}
+
+	String getPlayerName()
+	{
+		return playerName;
 	}
 
 	@Nullable

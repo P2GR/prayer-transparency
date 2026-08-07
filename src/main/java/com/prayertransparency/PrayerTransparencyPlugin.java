@@ -27,7 +27,9 @@ package com.prayertransparency;
 import com.google.inject.Inject;
 import com.google.inject.Provides;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import net.runelite.api.Client;
@@ -38,6 +40,7 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
+import lombok.extern.slf4j.Slf4j;
 
 /**
  * Makes the overhead prayer icons floating above players semi-transparent.
@@ -65,13 +68,22 @@ import net.runelite.client.ui.overlay.OverlayManager;
 	description = "Makes overhead prayers transparent with a configurable opacity",
 	tags = {"prayer", "overhead", "transparent", "alpha", "p2"}
 )
+@Slf4j
 public class PrayerTransparencyPlugin extends Plugin
 {
+	private static final String LEGACY_GROUP = "p2PrayerTransparency";
+	private static final String[] CONFIG_KEYS = {
+		"enabled", "transparency", "localPlayerOnly", "verticalOffset", "iconStyle", "debugLogging"
+	};
+
 	@Inject
 	private Client client;
 
 	@Inject
 	private PrayerTransparencyConfig config;
+
+	@Inject
+	private ConfigManager configManager;
 
 	@Inject
 	private OverlayManager overlayManager;
@@ -91,6 +103,12 @@ public class PrayerTransparencyPlugin extends Plugin
 	 * Lazily loaded from the game's sprite index.
 	 */
 	private final Map<HeadIcon, SpritePixels> cleanIcons = new EnumMap<>(HeadIcon.class);
+	/**
+	 * Native overhead prayer sprites, keyed by head icon. Their exact dimensions
+	 * define the only pixels this plugin may capture and modify.
+	 */
+	private final Map<HeadIcon, SpritePixels> gameIcons = new EnumMap<>(HeadIcon.class);
+	private final Map<String, Long> debugLogTimes = new HashMap<>();
 
 	@Provides
 	PrayerTransparencyConfig provideConfig(ConfigManager configManager)
@@ -101,6 +119,7 @@ public class PrayerTransparencyPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
+		migrateLegacyConfig();
 		captureOverlay = new PrayerTransparencyCaptureOverlay(this, config);
 		applyOverlay = new PrayerTransparencyApplyOverlay(this, config);
 		overlayManager.add(captureOverlay);
@@ -121,6 +140,22 @@ public class PrayerTransparencyPlugin extends Plugin
 		captureOverlay = null;
 		applyOverlay = null;
 		regions.clear();
+		debugLogTimes.clear();
+	}
+
+	private void migrateLegacyConfig()
+	{
+		for (String key : CONFIG_KEYS)
+		{
+			if (configManager.getConfiguration(PrayerTransparencyConfig.GROUP, key) == null)
+			{
+				String legacyValue = configManager.getConfiguration(LEGACY_GROUP, key);
+				if (legacyValue != null)
+				{
+					configManager.setConfiguration(PrayerTransparencyConfig.GROUP, key, legacyValue);
+				}
+			}
+		}
 	}
 
 	Client getClient()
@@ -140,15 +175,35 @@ public class PrayerTransparencyPlugin extends Plugin
 
 	/**
 	 * Grows the reusable scratch buffer when needed; never shrinks it.
+	 * <p>
+	 * The buffer can grow mid-frame once several players are present, so the
+	 * old contents (already-captured regions) must be preserved - otherwise
+	 * every earlier region is orphaned and its erase/redraw reads zeros.
 	 */
 	int[] ensureScratch(int size)
 	{
 		if (scratch.length < size)
 		{
 			int newSize = Math.max(size, scratch.length * 2);
-			scratch = new int[newSize];
+			scratch = Arrays.copyOf(scratch, newSize);
 		}
 		return scratch;
+	}
+
+	void debugEvery(String key, String message, Object... arguments)
+	{
+		if (!config.debugLogging())
+		{
+			return;
+		}
+		long now = System.currentTimeMillis();
+		Long previous = debugLogTimes.get(key);
+		if (previous != null && now - previous < 1000)
+		{
+			return;
+		}
+		debugLogTimes.put(key, now);
+		log.info("[Prayer Transparency] " + message, arguments);
 	}
 
 	/**
@@ -163,6 +218,32 @@ public class PrayerTransparencyPlugin extends Plugin
 			return null;
 		}
 		return cleanIcons.computeIfAbsent(icon, this::loadCleanIcon);
+	}
+
+	SpritePixels getGameIcon(HeadIcon icon)
+	{
+		if (icon == null)
+		{
+			return null;
+		}
+		return gameIcons.computeIfAbsent(icon, this::loadGameIcon);
+	}
+
+	private SpritePixels loadGameIcon(HeadIcon icon)
+	{
+		SpritePixels[] sprites = client.getSprites(client.getIndexSprites(), SpriteID.HEADICONS_PRAYER, 0);
+		if (sprites == null || icon.ordinal() >= sprites.length)
+		{
+			debugEvery("sprite-missing-" + icon, "native sprite missing: icon={}, ordinal={}, spriteCount={}",
+				icon, icon.ordinal(), sprites == null ? -1 : sprites.length);
+			return null;
+		}
+		SpritePixels sprite = sprites[icon.ordinal()];
+		debugEvery("sprite-loaded-" + icon,
+			"native sprite loaded: icon={}, ordinal={}, size={}x{}, max={}x{}, offset=({},{}), pixels={}",
+			icon, icon.ordinal(), sprite.getWidth(), sprite.getHeight(), sprite.getMaxWidth(),
+			sprite.getMaxHeight(), sprite.getOffsetX(), sprite.getOffsetY(), sprite.getPixels().length);
+		return sprite;
 	}
 
 	private SpritePixels loadCleanIcon(HeadIcon icon)

@@ -48,17 +48,9 @@ import net.runelite.client.ui.overlay.OverlayLayer;
  */
 class PrayerTransparencyCaptureOverlay extends Overlay
 {
-	// Region geometry, baked in: only the icon's own pixels (those differing
-	// from the captured scene) are modified, so the region only has to cover
-	// the icon. It is deliberately TALL: the icon's screen height varies a lot
-	// with camera pitch (and with the model's animation bob), while its
-	// horizontal position is stable at the player's tile center. A wide short
-	// box lets the icon drift out of range at steep camera angles.
-	private static final int ICON_HALF_WIDTH = 48;
-	private static final int ICON_HALF_HEIGHT = 128;
-	// Extra height (local units, 128 = one tile) above the model top where the
-	// head icon is drawn. 96 local units = 3/4 tile above the head.
-	private static final int ICON_HEIGHT_OFFSET = 96;
+	private static final int NATIVE_ANCHOR_HEIGHT = 15;
+	private static final int MAX_OVERHEAD_STACK_HEIGHT = 192;
+	private static final int NATIVE_EDGE_MARGIN = 4;
 
 	private final PrayerTransparencyPlugin plugin;
 	private final PrayerTransparencyConfig config;
@@ -75,14 +67,18 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 	@Override
 	public Dimension render(Graphics2D graphics)
 	{
-		if (config == null || !config.enabled())
-		{
-			return null;
-		}
-
 		Client client = plugin.getClient();
 		List<HeadIconRegion> regions = plugin.getRegions();
+		// Always reset per-frame state, even when disabled, so no stale regions
+		// survive from a frame where the plugin was active.
 		regions.clear();
+
+		if (config == null || !config.enabled())
+		{
+			// Disabled: never touch the buffer; the game renders its icons
+			// natively, fully restored.
+			return null;
+		}
 
 		BufferProvider bufferProvider = client.getBufferProvider();
 		if (bufferProvider == null)
@@ -106,9 +102,6 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 
 		Player localPlayer = client.getLocalPlayer();
 		int plane = worldView.getPlane();
-		int halfWidth = ICON_HALF_WIDTH;
-		int halfHeight = ICON_HALF_HEIGHT;
-		int heightOffset = ICON_HEIGHT_OFFSET;
 		int verticalOffset = config.verticalOffset();
 
 		// Snapshot the scene behind each icon into the shared scratch buffer. The
@@ -130,37 +123,57 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 				continue;
 			}
 
-			Point canvas = iconCanvasPoint(client, player, plane, heightOffset);
+			net.runelite.api.SpritePixels gameIcon = plugin.getGameIcon(player.getOverheadIcon());
+			if (gameIcon == null)
+			{
+				continue;
+			}
+
+			// The game projects logicalHeight + 15, then stacks names, health bars,
+			// skulls and the prayer icon upward in fixed screen pixels. Capture only
+			// the icon-width lane; the apply pass locates the native sprite exactly.
+			Point canvas = iconCanvasPoint(client, player, plane, NATIVE_ANCHOR_HEIGHT);
 			if (canvas == null)
 			{
 				continue;
 			}
 
-			int x0 = Math.max(0, canvas.getX() - halfWidth);
-			int y0 = Math.max(0, canvas.getY() - halfHeight);
-			int x1 = Math.min(bufferWidth - 1, canvas.getX() + halfWidth);
-			int y1 = Math.min(bufferHeight - 1, canvas.getY() + halfHeight);
-			if (x1 < x0 || y1 < y0)
+			int nativeX = canvas.getX() - gameIcon.getMaxWidth() / 2 + gameIcon.getOffsetX()
+				- NATIVE_EDGE_MARGIN;
+			int nativeY = canvas.getY() - MAX_OVERHEAD_STACK_HEIGHT - NATIVE_EDGE_MARGIN;
+			int nativeWidth = gameIcon.getWidth() + NATIVE_EDGE_MARGIN * 2;
+			int nativeHeight = MAX_OVERHEAD_STACK_HEIGHT + NATIVE_EDGE_MARGIN * 2;
+			int x0 = Math.max(0, nativeX);
+			int y0 = Math.max(0, nativeY);
+			int x1 = Math.min(bufferWidth, nativeX + nativeWidth);
+			int y1 = Math.min(bufferHeight, nativeY + nativeHeight);
+			if (x1 <= x0 || y1 <= y0)
 			{
 				continue;
 			}
 
-			int regionWidth = x1 - x0 + 1;
-			int regionHeight = y1 - y0 + 1;
+			int regionWidth = x1 - x0;
+			int regionHeight = y1 - y0;
 			int regionSize = regionWidth * regionHeight;
 
-			// Target region: same size, centered on the icon projected at the
-			// configured vertical offset. Origin is left unclamped so the 1:1
-			// pixel mapping to the original region stays exact.
-			Point targetCanvas = iconCanvasPoint(client, player, plane, heightOffset + verticalOffset);
-			int targetX = targetCanvas == null ? x0 : targetCanvas.getX() - halfWidth;
-			int targetY = targetCanvas == null ? y0 : targetCanvas.getY() - halfHeight;
+			// Keep native sprite bounds as the baseline. Apply only the projection
+			// delta for a vertical offset, which naturally accounts for zoom.
+			Point targetCanvas = iconCanvasPoint(client, player, plane,
+				NATIVE_ANCHOR_HEIGHT + verticalOffset);
+			int targetX = x0;
+			int targetY = y0;
+			if (verticalOffset != 0 && targetCanvas != null && canvas != null)
+			{
+				targetX += targetCanvas.getX() - canvas.getX();
+				targetY += targetCanvas.getY() - canvas.getY();
+			}
 
-			scratch = plugin.ensureScratch(scratchOffset + regionSize * 4);
+			scratch = plugin.ensureScratch(scratchOffset + regionSize * 5);
 			int origBgOffset = scratchOffset;
 			int targetBgOffset = scratchOffset + regionSize;
 			int iconOffset = scratchOffset + regionSize * 2;
 			int maskOffset = scratchOffset + regionSize * 3;
+			int eraseMaskOffset = scratchOffset + regionSize * 4;
 
 			// Capture the scene behind the game's icon.
 			for (int row = 0; row < regionHeight; row++)
@@ -191,19 +204,24 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 			}
 
 			regions.add(new HeadIconRegion(x0, y0, regionWidth, regionHeight,
-				targetX, targetY, origBgOffset, targetBgOffset, iconOffset, maskOffset,
+				targetX, targetY, canvas.getX(),
+				origBgOffset, targetBgOffset, iconOffset, maskOffset, eraseMaskOffset,
+				gameIcon, player.getOverheadIcon(), player.getName(),
 				config.iconStyle() == PrayerTransparencyConfig.IconStyle.CLEAN
 					? plugin.getCleanIcon(player.getOverheadIcon())
 					: null));
-			scratchOffset += regionSize * 4;
+			scratchOffset += regionSize * 5;
+			plugin.debugEvery("capture-" + player.getName(),
+				"capture: player={}, icon={}, logicalHeight={}, anchor=({},{}), lane=({},{} {}x{}), target=({},{}), verticalOffset={}, gpu={}",
+				player.getName(), player.getOverheadIcon(), player.getLogicalHeight(), canvas.getX(), canvas.getY(),
+				x0, y0, regionWidth, regionHeight, targetX, targetY, verticalOffset, client.isGpu());
 		}
 
 		return null;
 	}
 
 	/**
-	 * Projects the location where the game draws the overhead head icon for a
-	 * player: centered on the player, a fixed amount above the top of the model.
+	 * Projects the actor anchor used by the native overhead renderer.
 	 */
 	private Point iconCanvasPoint(Client client, Player player, int plane, int heightOffset)
 	{
