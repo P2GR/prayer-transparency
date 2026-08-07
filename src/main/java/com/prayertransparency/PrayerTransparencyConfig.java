@@ -27,7 +27,6 @@ package com.prayertransparency;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
-import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.Range;
 
 @ConfigGroup(PrayerTransparencyConfig.GROUP)
@@ -95,24 +94,5 @@ public interface PrayerTransparencyConfig extends Config
 	{
 		GAME,
 		CLEAN
-	}
-
-	@ConfigSection(
-		name = "Advanced",
-		description = "Debug settings",
-		position = 5
-	)
-	String advancedSection = "advanced";
-
-	@ConfigItem(
-		keyName = "debugLogging",
-		name = "Debug logging",
-		description = "Logs per-frame detection details and draws debug boxes around detected prayer icons",
-		position = 0,
-		section = advancedSection
-	)
-	default boolean debugLogging()
-	{
-		return false;
 	}
 }

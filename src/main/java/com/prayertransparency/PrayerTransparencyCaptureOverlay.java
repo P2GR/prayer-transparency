@@ -24,11 +24,9 @@
  */
 package com.prayertransparency;
 
-import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Graphics2D;
 import java.util.List;
-import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.BufferProvider;
 import net.runelite.api.Client;
 import net.runelite.api.Perspective;
@@ -48,11 +46,8 @@ import net.runelite.client.ui.overlay.OverlayLayer;
  * {@link PrayerTransparencyApplyOverlay} can blend a semi-transparent icon
  * back over the scene later in the same frame.
  */
-@Slf4j
 class PrayerTransparencyCaptureOverlay extends Overlay
 {
-	private static final int LOG_EVERY_N_FRAMES = 60;
-
 	// Region geometry, baked in: only the icon's own pixels (those differing
 	// from the captured scene) are modified, so the region only has to cover
 	// the icon. It is deliberately TALL: the icon's screen height varies a lot
@@ -67,8 +62,6 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 
 	private final PrayerTransparencyPlugin plugin;
 	private final PrayerTransparencyConfig config;
-
-	private int frameCounter;
 
 	PrayerTransparencyCaptureOverlay(PrayerTransparencyPlugin plugin, PrayerTransparencyConfig config)
 	{
@@ -111,15 +104,12 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 			return null;
 		}
 
-		boolean debug = config.debugLogging();
 		Player localPlayer = client.getLocalPlayer();
 		int plane = worldView.getPlane();
 		int halfWidth = ICON_HALF_WIDTH;
 		int halfHeight = ICON_HALF_HEIGHT;
 		int heightOffset = ICON_HEIGHT_OFFSET;
 		int verticalOffset = config.verticalOffset();
-		int playersWithIcons = 0;
-		int playersVisible = 0;
 
 		// Snapshot the scene behind each icon into the shared scratch buffer. The
 		// apply overlay consumes these regions later in the same frame.
@@ -131,12 +121,10 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 			{
 				continue;
 			}
-			playersVisible++;
 			if (player.getOverheadIcon() == null)
 			{
 				continue;
 			}
-			playersWithIcons++;
 			if (config.localPlayerOnly() && player != localPlayer)
 			{
 				continue;
@@ -145,10 +133,6 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 			Point canvas = iconCanvasPoint(client, player, plane, heightOffset);
 			if (canvas == null)
 			{
-				if (debug)
-				{
-					log.debug("Capture: player {} has icon but projects off-canvas", player.getName());
-				}
 				continue;
 			}
 
@@ -158,10 +142,6 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 			int y1 = Math.min(bufferHeight - 1, canvas.getY() + halfHeight);
 			if (x1 < x0 || y1 < y0)
 			{
-				if (debug)
-				{
-					log.debug("Capture: player {} icon center ({},{}) outside buffer", player.getName(), canvas.getX(), canvas.getY());
-				}
 				continue;
 			}
 
@@ -216,65 +196,9 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 					? plugin.getCleanIcon(player.getOverheadIcon())
 					: null));
 			scratchOffset += regionSize * 4;
-
-			if (debug)
-			{
-				log.debug("Capture: {} icon center=({},{}), region=({},{})-({},{}), target=({},{}), logicalHeight={}, offset={}+{}",
-					player.getName(), canvas.getX(), canvas.getY(), x0, y0, x1, y1,
-					targetX + halfWidth, targetY + halfHeight,
-					player.getLogicalHeight(), heightOffset, verticalOffset);
-			}
-		}
-
-		if (debug)
-		{
-			// Visual markers: cyan crosshair at the game's icon, orange at the
-			// target location it is moved to.
-			graphics.setColor(Color.CYAN);
-			drawCrosshair(graphics, client, worldView, localPlayer, plane, heightOffset, config, verticalOffset, false);
-			if (verticalOffset != 0)
-			{
-				graphics.setColor(Color.ORANGE);
-				drawCrosshair(graphics, client, worldView, localPlayer, plane, heightOffset, config, verticalOffset, true);
-			}
-
-			frameCounter++;
-			if (frameCounter % LOG_EVERY_N_FRAMES == 0)
-			{
-				log.debug("Capture: buffer={}x{} gpu={} plane={} playersVisible={} playersWithIcons={} regionsCaptured={} verticalOffset={}",
-					bufferWidth, bufferHeight, client.isGpu(), plane,
-					playersVisible, playersWithIcons, regions.size(), verticalOffset);
-			}
 		}
 
 		return null;
-	}
-
-	private void drawCrosshair(Graphics2D graphics, Client client, WorldView worldView,
-		Player localPlayer, int plane, int heightOffset, PrayerTransparencyConfig config,
-		int verticalOffset, boolean atTarget)
-	{
-		for (Player player : worldView.players())
-		{
-			if (player == null || player.getOverheadIcon() == null)
-			{
-				continue;
-			}
-			if (config.localPlayerOnly() && player != localPlayer)
-			{
-				continue;
-			}
-			int offset = atTarget ? heightOffset + verticalOffset : heightOffset;
-			Point canvas = iconCanvasPoint(client, player, plane, offset);
-			if (canvas == null)
-			{
-				continue;
-			}
-			int cx = canvas.getX();
-			int cy = canvas.getY();
-			graphics.drawLine(cx - 8, cy, cx + 8, cy);
-			graphics.drawLine(cx, cy - 8, cx, cy + 8);
-		}
 	}
 
 	/**

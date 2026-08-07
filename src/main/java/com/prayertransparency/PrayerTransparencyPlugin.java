@@ -30,7 +30,6 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
-import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.HeadIcon;
 import net.runelite.api.SpritePixels;
@@ -61,7 +60,6 @@ import net.runelite.client.ui.overlay.OverlayManager;
  * plugin uploads as the interface texture, so this works in both software and
  * GPU rendering modes.
  */
-@Slf4j
 @PluginDescriptor(
 	name = "Prayer Transparency",
 	description = "Makes overhead prayers transparent with a configurable opacity",
@@ -103,15 +101,10 @@ public class PrayerTransparencyPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		// Overlays must be created here, not in field initializers: Guice injects
-		// the config/client fields only after construction, so building the
-		// overlays at construction time would hand them a null config.
 		captureOverlay = new PrayerTransparencyCaptureOverlay(this, config);
 		applyOverlay = new PrayerTransparencyApplyOverlay(this, config);
 		overlayManager.add(captureOverlay);
 		overlayManager.add(applyOverlay);
-		log.debug("Prayer transparency started: transparency={} localPlayerOnly={} debugLogging={}",
-			config.transparency(), config.localPlayerOnly(), config.debugLogging());
 	}
 
 	@Override
@@ -204,7 +197,6 @@ public class PrayerTransparencyPlugin extends Plugin
 			case SMITE:
 				return SpriteID.Prayeron.SMITE;
 			default:
-				// No clean prayer book equivalent for curse / combined head icons.
 				return null;
 		}
 	}

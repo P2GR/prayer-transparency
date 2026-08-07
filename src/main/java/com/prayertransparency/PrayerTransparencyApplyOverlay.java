@@ -24,11 +24,9 @@
  */
 package com.prayertransparency;
 
-import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Graphics2D;
 import java.util.List;
-import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.BufferProvider;
 import net.runelite.api.Client;
 import net.runelite.client.ui.overlay.Overlay;
@@ -47,15 +45,10 @@ import net.runelite.client.ui.overlay.OverlayLayer;
  * Pixels the icon did not touch are identical in both images and therefore
  * unchanged, so over-covering the icon with a generous region is harmless.
  */
-@Slf4j
 class PrayerTransparencyApplyOverlay extends Overlay
 {
-	private static final int LOG_EVERY_N_FRAMES = 60;
-
 	private final PrayerTransparencyPlugin plugin;
 	private final PrayerTransparencyConfig config;
-
-	private int frameCounter;
 
 	PrayerTransparencyApplyOverlay(PrayerTransparencyPlugin plugin, PrayerTransparencyConfig config)
 	{
@@ -95,99 +88,20 @@ class PrayerTransparencyApplyOverlay extends Overlay
 			return null;
 		}
 
-		boolean debug = config.debugLogging();
 		int[] scratch = plugin.getScratch();
 		// Config is a 0-10 transparency scale (0 = fully visible, 10 = 250/255
 		// transparent); convert to an alpha in 0-255 where 255 = fully opaque.
 		int alpha = 255 - config.transparency() * 25;
 		int inverseAlpha = 255 - alpha;
 		boolean gpu = client.isGpu();
-		int touchedPixels = 0;
 
 		for (HeadIconRegion region : regions)
 		{
-			touchedPixels += eraseAndRedraw(pixels, bufferWidth, bufferHeight, scratch, region, alpha, inverseAlpha, gpu);
-		}
-
-		if (debug)
-		{
-			// Visual markers: magenta box where the game drew the icon, orange box
-			// at the target location it is moved to.
-			graphics.setColor(Color.MAGENTA);
-			for (HeadIconRegion region : regions)
-			{
-				graphics.drawRect(region.getX(), region.getY(),
-					region.getWidth() - 1, region.getHeight() - 1);
-			}
-			graphics.setColor(Color.ORANGE);
-			for (HeadIconRegion region : regions)
-			{
-				graphics.drawRect(region.getTargetX(), region.getTargetY(),
-					region.getWidth() - 1, region.getHeight() - 1);
-			}
-
-			// Self-test: paint a fixed 60x60 box at (40,40) straight into the buffer,
-			// blended toward red. If this box is visible, raw buffer writes are being
-			// displayed; if it is missing, we are writing to the wrong buffer.
-			blendTestBox(pixels, bufferWidth, bufferHeight, 40, 40, 60, 60, alpha, inverseAlpha, gpu);
-
-			frameCounter++;
-			if (frameCounter % LOG_EVERY_N_FRAMES == 0)
-			{
-				log.debug("Apply: regions={} touchedPixels={} opacity={} gpu={}",
-					regions.size(), touchedPixels, alpha, gpu);
-				if (touchedPixels == 0)
-				{
-					log.warn("Apply: no icon pixels found in any region - the overhead icon was not "
-						+ "drawn into this buffer between drawScene and drawAboveOverheads");
-				}
-			}
+			eraseAndRedraw(pixels, bufferWidth, bufferHeight, scratch, region, alpha, inverseAlpha, gpu);
 		}
 
 		regions.clear();
 		return null;
-	}
-
-	private static void blendTestBox(int[] pixels, int bufferWidth, int bufferHeight,
-		int x, int y, int w, int h, int alpha, int inverseAlpha, boolean gpu)
-	{
-		if (x < 0 || y < 0 || x >= bufferWidth || y >= bufferHeight)
-		{
-			return;
-		}
-		if (x + w > bufferWidth)
-		{
-			w = bufferWidth - x;
-		}
-		if (y + h > bufferHeight)
-		{
-			h = bufferHeight - y;
-		}
-		if (w <= 0 || h <= 0)
-		{
-			return;
-		}
-
-		for (int row = 0; row < h; row++)
-		{
-			int dest = (y + row) * bufferWidth + x;
-			for (int column = 0; column < w; column++)
-			{
-				int current = pixels[dest + column];
-				if (gpu)
-				{
-					// Premultiplied red: RGB = (alpha, 0, 0) with alpha channel = alpha.
-					pixels[dest + column] = (alpha << 24) | (alpha << 16);
-				}
-				else
-				{
-					int red = ((current >>> 16 & 0xFF) * alpha + 255 * inverseAlpha) / 255;
-					int green = ((current >>> 8 & 0xFF) * alpha) / 255;
-					int blue = ((current & 0xFF) * alpha) / 255;
-					pixels[dest + column] = (current & 0xFF000000) | red << 16 | green << 8 | blue;
-				}
-			}
-		}
 	}
 
 	/**
