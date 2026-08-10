@@ -34,11 +34,11 @@ import net.runelite.api.SpritePixels;
  * <p>
  * The pixel data lives in a shared scratch buffer owned by
  * {@link PrayerTransparencyPlugin}, laid out per region as four consecutive
- * {@code width * height} sections:
- * <pre>
- *   [captured scene behind the game icon] [captured scene at the target]
- *   [extracted icon pixels] [0/1 icon mask]
- * </pre>
+	 * {@code width * height} sections:
+	 * <pre>
+	 *   [captured scene behind the game icon] [captured scene at the target]
+	 *   [canonical icon pixels] [0/1 visible icon mask] [0/1 safe target mask]
+	 * </pre>
  */
 class HeadIconRegion
 {
@@ -61,7 +61,7 @@ class HeadIconRegion
 	private final int targetBgOffset;
 	private final int iconOffset;
 	private final int maskOffset;
-	private final int eraseMaskOffset;
+	private final int drawMaskOffset;
 	private final SpritePixels nativeIcon;
 	private final HeadIcon headIcon;
 	private final String playerName;
@@ -75,7 +75,7 @@ class HeadIconRegion
 
 	HeadIconRegion(int x, int y, int width, int height, int targetX, int targetY,
 		int iconX, int origBgOffset, int targetBgOffset, int iconOffset, int maskOffset,
-		int eraseMaskOffset,
+		int drawMaskOffset,
 		SpritePixels nativeIcon, HeadIcon headIcon, String playerName, @Nullable SpritePixels cleanIcon)
 	{
 		this.x = x;
@@ -89,7 +89,7 @@ class HeadIconRegion
 		this.targetBgOffset = targetBgOffset;
 		this.iconOffset = iconOffset;
 		this.maskOffset = maskOffset;
-		this.eraseMaskOffset = eraseMaskOffset;
+		this.drawMaskOffset = drawMaskOffset;
 		this.nativeIcon = nativeIcon;
 		this.headIcon = headIcon;
 		this.playerName = playerName;
@@ -151,9 +151,9 @@ class HeadIconRegion
 		return maskOffset;
 	}
 
-	int getEraseMaskOffset()
+	int getDrawMaskOffset()
 	{
-		return eraseMaskOffset;
+		return drawMaskOffset;
 	}
 
 	SpritePixels getNativeIcon()

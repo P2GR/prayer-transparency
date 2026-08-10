@@ -35,6 +35,7 @@ import net.runelite.api.Point;
 import net.runelite.api.WorldView;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
+import net.runelite.client.ui.overlay.OverlayPosition;
 
 /**
  * Runs in {@link OverlayLayer#ABOVE_SCENE}, i.e. right after the 3D scene has
@@ -60,7 +61,9 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 		this.plugin = plugin;
 		this.config = config;
 		setLayer(OverlayLayer.ABOVE_SCENE);
-		// Run first so nothing else has drawn into the regions we snapshot.
+		setPosition(OverlayPosition.DYNAMIC);
+		// Capture late among scene overlays so their pixels become background and
+		// are not mistaken for native prayer pixels in the apply pass.
 		setPriority(Overlay.PRIORITY_HIGHEST);
 	}
 
@@ -77,6 +80,12 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 		{
 			// Disabled: never touch the buffer; the game renders its icons
 			// natively, fully restored.
+			return null;
+		}
+		if (config.transparency() == 0 && config.verticalOffset() == 0
+			&& config.iconStyle() == PrayerTransparencyConfig.IconStyle.GAME)
+		{
+			// Native appearance requested. Avoid touching the frame buffer at all.
 			return null;
 		}
 
@@ -157,14 +166,15 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 			int regionSize = regionWidth * regionHeight;
 
 			// Keep native sprite bounds as the baseline. Apply only the projection
-			// delta for a vertical offset, which naturally accounts for zoom.
+			// Y delta for a vertical offset, which naturally accounts for zoom.
+			// Do not apply the projected X delta: this setting promises vertical
+			// movement and perspective can otherwise introduce sideways drift.
 			Point targetCanvas = iconCanvasPoint(client, player, plane,
 				NATIVE_ANCHOR_HEIGHT + verticalOffset);
 			int targetX = x0;
 			int targetY = y0;
 			if (verticalOffset != 0 && targetCanvas != null && canvas != null)
 			{
-				targetX += targetCanvas.getX() - canvas.getX();
 				targetY += targetCanvas.getY() - canvas.getY();
 			}
 
@@ -173,7 +183,7 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 			int targetBgOffset = scratchOffset + regionSize;
 			int iconOffset = scratchOffset + regionSize * 2;
 			int maskOffset = scratchOffset + regionSize * 3;
-			int eraseMaskOffset = scratchOffset + regionSize * 4;
+			int drawMaskOffset = scratchOffset + regionSize * 4;
 
 			// Capture the scene behind the game's icon.
 			for (int row = 0; row < regionHeight; row++)
@@ -205,7 +215,7 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 
 			regions.add(new HeadIconRegion(x0, y0, regionWidth, regionHeight,
 				targetX, targetY, canvas.getX(),
-				origBgOffset, targetBgOffset, iconOffset, maskOffset, eraseMaskOffset,
+				origBgOffset, targetBgOffset, iconOffset, maskOffset, drawMaskOffset,
 				gameIcon, player.getOverheadIcon(), player.getName(),
 				config.iconStyle() == PrayerTransparencyConfig.IconStyle.CLEAN
 					? plugin.getCleanIcon(player.getOverheadIcon())

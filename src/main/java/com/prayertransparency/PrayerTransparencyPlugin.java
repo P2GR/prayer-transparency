@@ -71,6 +71,7 @@ import lombok.extern.slf4j.Slf4j;
 @Slf4j
 public class PrayerTransparencyPlugin extends Plugin
 {
+	static final String ERASER_REVISION = "xy-match-v4";
 	private static final String LEGACY_GROUP = "p2PrayerTransparency";
 	private static final String[] CONFIG_KEYS = {
 		"enabled", "transparency", "localPlayerOnly", "verticalOffset", "iconStyle", "debugLogging"
@@ -120,6 +121,7 @@ public class PrayerTransparencyPlugin extends Plugin
 	protected void startUp()
 	{
 		migrateLegacyConfig();
+		log.info("[Prayer Transparency] started: nativeEraser={}", ERASER_REVISION);
 		captureOverlay = new PrayerTransparencyCaptureOverlay(this, config);
 		applyOverlay = new PrayerTransparencyApplyOverlay(this, config);
 		overlayManager.add(captureOverlay);
@@ -140,6 +142,8 @@ public class PrayerTransparencyPlugin extends Plugin
 		captureOverlay = null;
 		applyOverlay = null;
 		regions.clear();
+		cleanIcons.clear();
+		gameIcons.clear();
 		debugLogTimes.clear();
 	}
 
@@ -197,6 +201,10 @@ public class PrayerTransparencyPlugin extends Plugin
 			return;
 		}
 		long now = System.currentTimeMillis();
+		if (debugLogTimes.size() >= 512 && !debugLogTimes.containsKey(key))
+		{
+			debugLogTimes.clear();
+		}
 		Long previous = debugLogTimes.get(key);
 		if (previous != null && now - previous < 1000)
 		{
@@ -239,6 +247,12 @@ public class PrayerTransparencyPlugin extends Plugin
 			return null;
 		}
 		SpritePixels sprite = sprites[icon.ordinal()];
+		if (sprite == null || sprite.getPixels() == null)
+		{
+			debugEvery("sprite-null-" + icon, "native sprite empty: icon={}, ordinal={}",
+				icon, icon.ordinal());
+			return null;
+		}
 		debugEvery("sprite-loaded-" + icon,
 			"native sprite loaded: icon={}, ordinal={}, size={}x{}, max={}x{}, offset=({},{}), pixels={}",
 			icon, icon.ordinal(), sprite.getWidth(), sprite.getHeight(), sprite.getMaxWidth(),
@@ -254,7 +268,8 @@ public class PrayerTransparencyPlugin extends Plugin
 			return null;
 		}
 		SpritePixels[] sprites = client.getSprites(client.getIndexSprites(), spriteId, 0);
-		if (sprites == null || sprites.length == 0)
+		if (sprites == null || sprites.length == 0 || sprites[0] == null
+			|| sprites[0].getPixels() == null)
 		{
 			return null;
 		}

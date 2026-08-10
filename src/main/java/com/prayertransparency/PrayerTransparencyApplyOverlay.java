@@ -26,11 +26,13 @@ package com.prayertransparency;
 
 import java.awt.Dimension;
 import java.awt.Graphics2D;
+import java.util.ArrayList;
 import java.util.List;
 import net.runelite.api.BufferProvider;
 import net.runelite.api.Client;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
+import net.runelite.client.ui.overlay.OverlayPosition;
 
 /**
  * Runs in {@link OverlayLayer#UNDER_WIDGETS}, i.e. after the game has drawn the
@@ -47,6 +49,7 @@ import net.runelite.client.ui.overlay.OverlayLayer;
  */
 class PrayerTransparencyApplyOverlay extends Overlay
 {
+	private static final int ERASE_ONLY_PIXEL = -1;
 	private final PrayerTransparencyPlugin plugin;
 	private final PrayerTransparencyConfig config;
 
@@ -55,7 +58,9 @@ class PrayerTransparencyApplyOverlay extends Overlay
 		this.plugin = plugin;
 		this.config = config;
 		setLayer(OverlayLayer.UNDER_WIDGETS);
-		// Run last so the blend is applied over anything else drawn in this layer.
+		setPosition(OverlayPosition.DYNAMIC);
+		// Run before normal scene overlays. They should render over the adjusted
+		// prayer, and must never become input to the native-sprite matcher.
 		setPriority(Overlay.PRIORITY_LOW);
 	}
 
@@ -91,13 +96,36 @@ class PrayerTransparencyApplyOverlay extends Overlay
 		int[] scratch = plugin.getScratch();
 		// Config is a 0-10 transparency scale (0 = fully visible, 10 = 250/255
 		// transparent); convert to an alpha in 0-255 where 255 = fully opaque.
-		int alpha = 255 - config.transparency() * 25;
+		int transparency = Math.max(0, Math.min(10, config.transparency()));
+		int alpha = 255 - transparency * 25;
 		int inverseAlpha = 255 - alpha;
 		boolean gpu = client.isGpu();
 
+		List<PreparedRegion> prepared = new ArrayList<>(regions.size());
 		for (HeadIconRegion region : regions)
 		{
-			eraseAndRedraw(plugin, pixels, bufferWidth, bufferHeight, scratch, region,
+			PreparedRegion preparedRegion = prepareRegion(plugin, pixels, bufferWidth, bufferHeight,
+				scratch, region);
+			if (preparedRegion != null)
+			{
+				prepared.add(preparedRegion);
+			}
+		}
+		prepared = removeDuplicateMatches(prepared);
+		for (PreparedRegion preparedRegion : prepared)
+		{
+			prepareDrawMask(pixels, bufferWidth, bufferHeight, scratch, preparedRegion);
+		}
+
+		// All detection must happen against the untouched post-overhead buffer.
+		// Otherwise one nearby player's redraw can become another player's input.
+		for (PreparedRegion preparedRegion : prepared)
+		{
+			restoreOriginal(pixels, bufferWidth, scratch, preparedRegion);
+		}
+		for (PreparedRegion preparedRegion : prepared)
+		{
+			drawRegion(pixels, bufferWidth, bufferHeight, scratch, preparedRegion,
 				alpha, inverseAlpha, gpu);
 		}
 
@@ -119,98 +147,117 @@ class PrayerTransparencyApplyOverlay extends Overlay
 	 *       channel (GPU)</li>
 	 * </ol>
 	 *
-	 * @return the number of icon pixels handled
+	 * @return prepared region, or {@code null} when matching is unsafe
 	 */
-	private static int eraseAndRedraw(PrayerTransparencyPlugin plugin, int[] pixels,
-		int bufferWidth, int bufferHeight, int[] scratch,
-		HeadIconRegion region, int alpha, int inverseAlpha, boolean gpu)
+	private static PreparedRegion prepareRegion(PrayerTransparencyPlugin plugin, int[] pixels,
+		int bufferWidth, int bufferHeight, int[] scratch, HeadIconRegion region)
 	{
 		int x0 = region.getX();
 		int y0 = region.getY();
-		int width = region.getWidth();
-		int height = region.getHeight();
-		int targetX = region.getTargetX();
-		int targetY = region.getTargetY();
+		int stride = region.getWidth();
+		int width = Math.min(stride, bufferWidth - x0);
+		int height = Math.min(region.getHeight(), bufferHeight - y0);
 		int origBgOffset = region.getOrigBgOffset();
-		int targetBgOffset = region.getTargetBgOffset();
 		int iconOffset = region.getIconOffset();
 		int maskOffset = region.getMaskOffset();
 		int touched = 0;
+		int fringe = 0;
 
 		// Clamp the original region against the current buffer in case the canvas
 		// was resized mid-frame. The mask/icon scratch is indexed by the original
 		// (dx, dy) layout, so width/height are shared with the target mapping.
 		if (x0 < 0 || y0 < 0 || x0 >= bufferWidth || y0 >= bufferHeight)
 		{
-			return 0;
-		}
-		if (x0 + width > bufferWidth)
-		{
-			width = bufferWidth - x0;
-		}
-		if (y0 + height > bufferHeight)
-		{
-			height = bufferHeight - y0;
+			return null;
 		}
 		if (width <= 0 || height <= 0)
 		{
-			return 0;
+			return null;
 		}
-		MatchResult match = findNativeIcon(pixels, bufferWidth, scratch, region, width, height);
+
+		NativeIconMatcher.Match match = findNativeIcon(pixels, bufferWidth, scratch, region,
+			width, height, stride);
 		String debugKey = "match-" + region.getPlayerName() + '-' + region.getHeadIcon();
-		if (!match.accepted)
+		if (!match.isAccepted())
 		{
 			plugin.debugEvery(debugKey,
-				"match rejected: player={}, icon={}, bestTop={}, screenY={}, exact={}, changed={}, opaque={}, ratio={}%, lane=({},{} {}x{}), sprite={}x{}",
-				region.getPlayerName(), region.getHeadIcon(), match.top,
-				match.top < 0 ? -1 : region.getY() + match.top, match.matches, match.changed,
-				match.opaque, match.ratio(), region.getX(), region.getY(), width, height,
+				"match rejected: player={}, icon={}, bestTop={}, screenY={}, matches={}, changed={}, opaque={}, ratio={}%, lane=({},{} {}x{}), sprite={}x{}",
+				region.getPlayerName(), region.getHeadIcon(), match.getTop(),
+				match.getOpaque() == 0 ? -1 : region.getY() + match.getTop(), match.getMatches(), match.getChanged(),
+				match.getOpaque(), match.ratio(), region.getX(), region.getY(), width, height,
 				region.getNativeIcon().getWidth(), region.getNativeIcon().getHeight());
-			return 0;
+			return null;
 		}
-		int nativeTop = match.top;
+		int nativeTop = match.getTop();
 		net.runelite.api.SpritePixels nativeIcon = region.getNativeIcon();
 		int nativeWidth = nativeIcon.getWidth();
 		int nativeHeight = nativeIcon.getHeight();
-		int nativeSourceX = x0 - (region.getIconX() - nativeIcon.getMaxWidth() / 2
+		int expectedSourceX = x0 - (region.getIconX() - nativeIcon.getMaxWidth() / 2
 			+ nativeIcon.getOffsetX());
+		int nativeSourceX = match.getSourceX();
 		int[] nativePixels = nativeIcon.getPixels();
 
-		// GPU compositing can transform native sprite RGB values. Once the matcher
-		// has verified the sprite shape, accept every changed opaque sprite pixel.
+		// Matching establishes ownership of the opaque sprite footprint. Erase
+		// every changed footprint pixel: color-based exceptions leave fragments
+		// when camera movement changes rendering or another overhead overlaps it.
 		for (int row = 0; row < height; row++)
 		{
 			int dest = (y0 + row) * bufferWidth + x0;
-			int slot = row * width;
+			int slot = row * stride;
 			for (int column = 0; column < width; column++, dest++, slot++)
 			{
+				scratch[maskOffset + slot] = 0;
 				int spriteX = nativeSourceX + column;
 				int spriteY = row - nativeTop;
-				if (spriteX < 0 || spriteX >= nativeWidth || spriteY < 0 || spriteY >= nativeHeight)
-				{
-					scratch[maskOffset + slot] = 0;
-					continue;
-				}
-				int nativePixel = nativePixels[spriteY * nativeWidth + spriteX];
 				int current = pixels[dest];
 				int background = scratch[origBgOffset + slot];
-				if (nativePixel == 0 || current == background)
+				boolean insideNative = spriteX >= 0 && spriteX < nativeWidth
+					&& spriteY >= 0 && spriteY < nativeHeight;
+				int nativePixel = insideNative ? nativePixels[spriteY * nativeWidth + spriteX] : 0;
+				if (NativeIconMatcher.isNativeFootprintPixel(current, background, nativePixel))
 				{
-					scratch[maskOffset + slot] = 0;
-					continue;
+					scratch[maskOffset + slot] = 1;
+					scratch[iconOffset + slot] = nativePixel & 0xFFFFFF;
+					touched++;
 				}
-				scratch[maskOffset + slot] = 1;
-				scratch[iconOffset + slot] = current;
-				touched++;
+				else if (nativePixel == 0
+					&& NativeIconMatcher.isNativeFringePixel(current, background, nativePixels,
+						nativeWidth, nativeHeight, spriteX, spriteY))
+				{
+					// Remove renderer fringe, but never redraw it at the shifted target.
+					scratch[maskOffset + slot] = 1;
+					scratch[iconOffset + slot] = ERASE_ONLY_PIXEL;
+					touched++;
+					fringe++;
+				}
 			}
 		}
 
-		// Pass 2: erase the game's icon (restore the captured scene).
-		for (int row = 0; row < height; row++)
+		plugin.debugEvery(debugKey,
+			"match accepted: player={}, icon={}, top={}, screenY={}, xShift={}, matches={}, changed={}, opaque={}, ratio={}%, touched={}, fringe={}",
+			region.getPlayerName(), region.getHeadIcon(), nativeTop, region.getY() + nativeTop,
+			expectedSourceX - nativeSourceX, match.getMatches(), match.getChanged(),
+			match.getOpaque(), match.ratio(), touched, fringe);
+
+		return new PreparedRegion(region, width, height, stride, nativeTop, nativeSourceX);
+	}
+
+	private static void restoreOriginal(int[] pixels, int bufferWidth, int[] scratch,
+		PreparedRegion prepared)
+	{
+		HeadIconRegion region = prepared.region;
+		int x0 = region.getX();
+		int y0 = region.getY();
+		int maskOffset = region.getMaskOffset();
+		int origBgOffset = region.getOrigBgOffset();
+
+		// Restore every native icon before any target icon is drawn. This removes
+		// all normal game prayers, including ones covered by another region.
+		for (int row = 0; row < prepared.height; row++)
 		{
 			int dest = (y0 + row) * bufferWidth + x0;
-			int slot = row * width;
-			for (int column = 0; column < width; column++, dest++, slot++)
+			int slot = row * prepared.stride;
+			for (int column = 0; column < prepared.width; column++, dest++, slot++)
 			{
 				if (scratch[maskOffset + slot] != 0)
 				{
@@ -218,13 +265,88 @@ class PrayerTransparencyApplyOverlay extends Overlay
 				}
 			}
 		}
+	}
 
-		// Pass 3: redraw the icon at the target height. If a clean prayer book
+	private static void prepareDrawMask(int[] pixels, int bufferWidth, int bufferHeight,
+		int[] scratch, PreparedRegion prepared)
+	{
+		HeadIconRegion region = prepared.region;
+		int targetX = region.getTargetX();
+		int targetY = region.getTargetY();
+		int drawMaskOffset = region.getDrawMaskOffset();
+		int targetBgOffset = region.getTargetBgOffset();
+		int sourceMaskOffset = region.getMaskOffset();
+		for (int row = 0; row < prepared.height; row++)
+		{
+			int targetRow = targetY + row;
+			int slot = row * prepared.stride;
+			for (int column = 0; column < prepared.width; column++, slot++)
+			{
+				scratch[drawMaskOffset + slot] = 0;
+				int targetColumn = targetX + column;
+				if (targetColumn < 0 || targetColumn >= bufferWidth
+					|| targetRow < 0 || targetRow >= bufferHeight)
+				{
+					continue;
+				}
+
+				int sourceColumn = targetColumn - region.getX();
+				int sourceRow = targetRow - region.getY();
+				boolean ownVisibleIcon = sourceColumn >= 0 && sourceColumn < prepared.width
+					&& sourceRow >= 0 && sourceRow < prepared.height
+					&& scratch[sourceMaskOffset + sourceRow * prepared.stride + sourceColumn] != 0;
+				int current = pixels[targetRow * bufferWidth + targetColumn];
+				int background = scratch[targetBgOffset + slot];
+				if (NativeIconMatcher.isSafeTargetPixel(current, background, ownVisibleIcon))
+				{
+					scratch[drawMaskOffset + slot] = 1;
+				}
+			}
+		}
+	}
+
+	private static List<PreparedRegion> removeDuplicateMatches(List<PreparedRegion> candidates)
+	{
+		List<PreparedRegion> unique = new ArrayList<>(candidates.size());
+		for (PreparedRegion candidate : candidates)
+		{
+			boolean duplicate = false;
+			for (PreparedRegion accepted : unique)
+			{
+				if (candidate.sameNativePlacement(accepted))
+				{
+					duplicate = true;
+					break;
+				}
+			}
+			if (!duplicate)
+			{
+				unique.add(candidate);
+			}
+		}
+		return unique;
+	}
+
+	private static void drawRegion(int[] pixels, int bufferWidth, int bufferHeight, int[] scratch,
+		PreparedRegion prepared, int alpha, int inverseAlpha, boolean gpu)
+	{
+		HeadIconRegion region = prepared.region;
+		int width = prepared.width;
+		int height = prepared.height;
+		int stride = prepared.stride;
+		int targetX = region.getTargetX();
+		int targetY = region.getTargetY();
+		int targetBgOffset = region.getTargetBgOffset();
+		int iconOffset = region.getIconOffset();
+		int maskOffset = region.getMaskOffset();
+		int drawMaskOffset = region.getDrawMaskOffset();
+
+		// Redraw the icon at target height. If clean prayer book
 		// sprite is configured, draw that instead of the game's captured icon
 		// (which includes the beige overhead circle).
 		if (region.getCleanIcon() != null)
 		{
-			drawCleanIcon(pixels, bufferWidth, bufferHeight, scratch, region, alpha, inverseAlpha, gpu);
+			drawCleanIcon(pixels, bufferWidth, bufferHeight, scratch, prepared, alpha, inverseAlpha, gpu);
 		}
 		else
 		{
@@ -235,10 +357,12 @@ class PrayerTransparencyApplyOverlay extends Overlay
 				{
 					continue;
 				}
-				int slot = row * width;
+				int slot = row * stride;
 				for (int column = 0; column < width; column++, slot++)
 				{
-					if (scratch[maskOffset + slot] == 0)
+					if (scratch[maskOffset + slot] == 0
+						|| scratch[iconOffset + slot] == ERASE_ONLY_PIXEL
+						|| scratch[drawMaskOffset + slot] == 0)
 					{
 						continue;
 					}
@@ -275,17 +399,43 @@ class PrayerTransparencyApplyOverlay extends Overlay
 				}
 			}
 		}
-
-		plugin.debugEvery(debugKey,
-			"match accepted: player={}, icon={}, top={}, screenY={}, exact={}, changed={}, opaque={}, ratio={}%, touched={}, alpha={}, style={}, gpu={}",
-			region.getPlayerName(), region.getHeadIcon(), nativeTop, region.getY() + nativeTop,
-			match.matches, match.changed, match.opaque, match.ratio(), touched, alpha,
-			region.getCleanIcon() == null ? "GAME" : "CLEAN", gpu);
-		return touched;
 	}
 
-	private static MatchResult findNativeIcon(int[] pixels, int bufferWidth, int[] scratch,
-		HeadIconRegion region, int width, int height)
+	private static final class PreparedRegion
+	{
+		private final HeadIconRegion region;
+		private final int width;
+		private final int height;
+		private final int stride;
+		private final int nativeTop;
+		private final int nativeSourceX;
+
+		private PreparedRegion(HeadIconRegion region, int width, int height, int stride,
+			int nativeTop, int nativeSourceX)
+		{
+			this.region = region;
+			this.width = width;
+			this.height = height;
+			this.stride = stride;
+			this.nativeTop = nativeTop;
+			this.nativeSourceX = nativeSourceX;
+		}
+
+		private boolean sameNativePlacement(PreparedRegion other)
+		{
+			net.runelite.api.SpritePixels sprite = region.getNativeIcon();
+			net.runelite.api.SpritePixels otherSprite = other.region.getNativeIcon();
+			int left = region.getX() - nativeSourceX;
+			int otherLeft = other.region.getX() - other.nativeSourceX;
+			return left == otherLeft
+				&& region.getY() + nativeTop == other.region.getY() + other.nativeTop
+				&& sprite.getWidth() == otherSprite.getWidth()
+				&& sprite.getHeight() == otherSprite.getHeight();
+		}
+	}
+
+	private static NativeIconMatcher.Match findNativeIcon(int[] pixels, int bufferWidth, int[] scratch,
+		HeadIconRegion region, int width, int height, int stride)
 	{
 		net.runelite.api.SpritePixels sprite = region.getNativeIcon();
 		int spriteWidth = sprite.getWidth();
@@ -293,83 +443,9 @@ class PrayerTransparencyApplyOverlay extends Overlay
 		int[] spritePixels = sprite.getPixels();
 		int sourceX = region.getX() - (region.getIconX() - sprite.getMaxWidth() / 2
 			+ sprite.getOffsetX());
-		int opaque = 0;
-		for (int row = 0; row < spriteHeight; row++)
-		{
-			for (int column = 0; column < width; column++)
-			{
-				int spriteX = sourceX + column;
-				if (spriteX >= 0 && spriteX < spriteWidth
-					&& spritePixels[row * spriteWidth + spriteX] != 0)
-				{
-					opaque++;
-				}
-			}
-		}
-
-		int bestTop = -1;
-		int bestMatches = 0;
-		int bestChanged = 0;
-		for (int top = 0; top + spriteHeight <= height; top++)
-		{
-			int matches = 0;
-			int changed = 0;
-			for (int row = 0; row < spriteHeight; row++)
-			{
-				int bufferIndex = (region.getY() + top + row) * bufferWidth + region.getX();
-				int scratchIndex = region.getOrigBgOffset() + (top + row) * width;
-				for (int column = 0; column < width; column++, bufferIndex++, scratchIndex++)
-				{
-					int spriteX = sourceX + column;
-					if (spriteX < 0 || spriteX >= spriteWidth)
-					{
-						continue;
-					}
-					int spritePixel = spritePixels[row * spriteWidth + spriteX];
-					int current = pixels[bufferIndex];
-					if (spritePixel != 0 && current != scratch[scratchIndex])
-					{
-						changed++;
-						if ((current & 0xFFFFFF) == (spritePixel & 0xFFFFFF))
-						{
-							matches++;
-						}
-					}
-				}
-			}
-			if (matches > bestMatches)
-			{
-				bestMatches = matches;
-				bestChanged = changed;
-				bestTop = top;
-			}
-		}
-		return new MatchResult(bestTop, bestMatches, bestChanged, opaque,
-			bestMatches >= 8 && bestMatches * 5 >= opaque
-				&& bestChanged * 10 >= opaque * 9);
-	}
-
-	private static final class MatchResult
-	{
-		private final int top;
-		private final int matches;
-		private final int changed;
-		private final int opaque;
-		private final boolean accepted;
-
-		private MatchResult(int top, int matches, int changed, int opaque, boolean accepted)
-		{
-			this.top = top;
-			this.matches = matches;
-			this.changed = changed;
-			this.opaque = opaque;
-			this.accepted = accepted;
-		}
-
-		private int ratio()
-		{
-			return opaque == 0 ? 0 : matches * 100 / opaque;
-		}
+		return NativeIconMatcher.find(pixels, bufferWidth, region.getX(), region.getY(),
+			width, height, scratch, region.getOrigBgOffset(), stride,
+			spritePixels, spriteWidth, spriteHeight, sourceX);
 	}
 
 	/**
@@ -377,17 +453,19 @@ class PrayerTransparencyApplyOverlay extends Overlay
 	 * position of the game's icon, scaled uniformly to the icon's on-screen
 	 * size, with the configured transparency.
 	 * <p>
-	 * The mask contains only pixels that exactly matched the native prayer
-	 * sprite, excluding overhead text, names and health bars.
+	 * Size and placement come from the canonical native sprite, so partial
+	 * occlusion cannot make the clean icon resize or jump between frames.
 	 */
 	private static void drawCleanIcon(int[] pixels, int bufferWidth, int bufferHeight, int[] scratch,
-		HeadIconRegion region, int alpha, int inverseAlpha, boolean gpu)
+		PreparedRegion prepared, int alpha, int inverseAlpha, boolean gpu)
 	{
-		int width = region.getWidth();
-		int height = region.getHeight();
+		HeadIconRegion region = prepared.region;
+		int width = prepared.width;
+		int height = prepared.height;
+		int stride = prepared.stride;
 		int targetX = region.getTargetX();
 		int targetY = region.getTargetY();
-		int maskOffset = region.getMaskOffset();
+		int drawMaskOffset = region.getDrawMaskOffset();
 		int targetBgOffset = region.getTargetBgOffset();
 		net.runelite.api.SpritePixels sprite = region.getCleanIcon();
 
@@ -399,40 +477,41 @@ class PrayerTransparencyApplyOverlay extends Overlay
 			return;
 		}
 
-		// Measure the icon's on-screen extent from the (already icon-only) mask.
-		// The blob refinement in eraseAndRedraw removed overhead text, names and
-		// health bars, so the full mask is exactly the icon.
-		int minX = width, minY = height, maxX = -1, maxY = -1;
-		for (int row = 0; row < height; row++)
+		// Measure canonical native bounds, not the visible per-frame mask.
+		net.runelite.api.SpritePixels nativeSprite = region.getNativeIcon();
+		int nativeW = nativeSprite.getWidth();
+		int nativeH = nativeSprite.getHeight();
+		int[] nativePixels = nativeSprite.getPixels();
+		int minNativeX = nativeW, minNativeY = nativeH, maxNativeX = -1, maxNativeY = -1;
+		for (int nativeY = 0; nativeY < nativeH; nativeY++)
 		{
-			int slot = row * width;
-			for (int column = 0; column < width; column++, slot++)
+			for (int nativeX = 0; nativeX < nativeW; nativeX++)
 			{
-				if (scratch[maskOffset + slot] != 0)
+				if (nativePixels[nativeY * nativeW + nativeX] != 0)
 				{
-					if (column < minX) minX = column;
-					if (column > maxX) maxX = column;
-					if (row < minY) minY = row;
-					if (row > maxY) maxY = row;
+					if (nativeX < minNativeX) minNativeX = nativeX;
+					if (nativeX > maxNativeX) maxNativeX = nativeX;
+					if (nativeY < minNativeY) minNativeY = nativeY;
+					if (nativeY > maxNativeY) maxNativeY = nativeY;
 				}
 			}
 		}
-		if (maxX < minX || maxY < minY)
+		if (maxNativeX < minNativeX || maxNativeY < minNativeY)
 		{
 			return;
 		}
 
-		// Uniform scale (preserve the sprite's aspect) so the icon is never
-		// squashed, sized to the game icon's larger extent.
-		int iconW = maxX - minX + 1;
-		int iconH = maxY - minY + 1;
+		int iconW = maxNativeX - minNativeX + 1;
+		int iconH = maxNativeY - minNativeY + 1;
 		int iconSize = Math.max(iconW, iconH);
 		int drawW = iconSize;
 		int drawH = Math.max(1, iconSize * spriteH / spriteW);
 
-		// Center on the detected icon's actual center (i.e. exactly where the
-		// game drew it), expressed in target-region coordinates so a vertical
-		// offset still applies.
+		int nativeSourceX = prepared.nativeSourceX;
+		int minX = minNativeX - nativeSourceX;
+		int maxX = maxNativeX - nativeSourceX;
+		int minY = prepared.nativeTop + minNativeY;
+		int maxY = prepared.nativeTop + maxNativeY;
 		int centerX = targetX + (minX + maxX) / 2;
 		int centerY = targetY + (minY + maxY) / 2;
 		int left = centerX - drawW / 2;
@@ -461,6 +540,12 @@ class PrayerTransparencyApplyOverlay extends Overlay
 				{
 					continue;
 				}
+				int dxr = dstX - targetX;
+				if (dxr < 0 || dyr < 0 || dxr >= width || dyr >= height
+					|| scratch[drawMaskOffset + dyr * stride + dxr] == 0)
+				{
+					continue;
+				}
 
 				int rgb = argb & 0xFFFFFF;
 				int dest = dstY * bufferWidth + dstX;
@@ -473,12 +558,7 @@ class PrayerTransparencyApplyOverlay extends Overlay
 				}
 				else
 				{
-					int dxr = dstX - targetX;
-					int targetBg = 0;
-					if (dxr >= 0 && dyr >= 0 && dxr < width && dyr < height)
-					{
-						targetBg = scratch[targetBgOffset + dyr * width + dxr];
-					}
+					int targetBg = scratch[targetBgOffset + dyr * stride + dxr];
 					int red = ((rgb >>> 16 & 0xFF) * alpha + (targetBg >>> 16 & 0xFF) * inverseAlpha) / 255;
 					int green = ((rgb >>> 8 & 0xFF) * alpha + (targetBg >>> 8 & 0xFF) * inverseAlpha) / 255;
 					int blue = ((rgb & 0xFF) * alpha + (targetBg & 0xFF) * inverseAlpha) / 255;
