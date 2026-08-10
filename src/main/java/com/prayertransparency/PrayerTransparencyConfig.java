@@ -27,7 +27,6 @@ package com.prayertransparency;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
-import net.runelite.client.config.ConfigSection;
 import net.runelite.client.config.Range;
 
 @ConfigGroup(PrayerTransparencyConfig.GROUP)
@@ -97,22 +96,4 @@ public interface PrayerTransparencyConfig extends Config
 		CLEAN
 	}
 
-	@ConfigSection(
-		name = "Advanced",
-		description = "Debug settings",
-		position = 5
-	)
-	String advancedSection = "advanced";
-
-	@ConfigItem(
-		keyName = "debugLogging",
-		name = "Debug logging",
-		description = "Logs capture geometry, native sprite metadata, match scores, and modified pixel counts",
-		position = 0,
-		section = advancedSection
-	)
-	default boolean debugLogging()
-	{
-		return false;
-	}
 }

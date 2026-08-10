@@ -29,7 +29,6 @@ import com.google.inject.Provides;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import net.runelite.api.Client;
@@ -40,7 +39,6 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.overlay.OverlayManager;
-import lombok.extern.slf4j.Slf4j;
 
 /**
  * Makes the overhead prayer icons floating above players semi-transparent.
@@ -68,13 +66,11 @@ import lombok.extern.slf4j.Slf4j;
 	description = "Makes overhead prayers transparent with a configurable opacity",
 	tags = {"prayer", "overhead", "transparent", "alpha", "p2"}
 )
-@Slf4j
 public class PrayerTransparencyPlugin extends Plugin
 {
-	static final String ERASER_REVISION = "xy-match-v4";
 	private static final String LEGACY_GROUP = "p2PrayerTransparency";
 	private static final String[] CONFIG_KEYS = {
-		"enabled", "transparency", "localPlayerOnly", "verticalOffset", "iconStyle", "debugLogging"
+		"enabled", "transparency", "localPlayerOnly", "verticalOffset", "iconStyle"
 	};
 
 	@Inject
@@ -109,7 +105,6 @@ public class PrayerTransparencyPlugin extends Plugin
 	 * define the only pixels this plugin may capture and modify.
 	 */
 	private final Map<HeadIcon, SpritePixels> gameIcons = new EnumMap<>(HeadIcon.class);
-	private final Map<String, Long> debugLogTimes = new HashMap<>();
 
 	@Provides
 	PrayerTransparencyConfig provideConfig(ConfigManager configManager)
@@ -121,7 +116,6 @@ public class PrayerTransparencyPlugin extends Plugin
 	protected void startUp()
 	{
 		migrateLegacyConfig();
-		log.info("[Prayer Transparency] started: nativeEraser={}", ERASER_REVISION);
 		captureOverlay = new PrayerTransparencyCaptureOverlay(this, config);
 		applyOverlay = new PrayerTransparencyApplyOverlay(this, config);
 		overlayManager.add(captureOverlay);
@@ -144,7 +138,6 @@ public class PrayerTransparencyPlugin extends Plugin
 		regions.clear();
 		cleanIcons.clear();
 		gameIcons.clear();
-		debugLogTimes.clear();
 	}
 
 	private void migrateLegacyConfig()
@@ -194,26 +187,6 @@ public class PrayerTransparencyPlugin extends Plugin
 		return scratch;
 	}
 
-	void debugEvery(String key, String message, Object... arguments)
-	{
-		if (!config.debugLogging())
-		{
-			return;
-		}
-		long now = System.currentTimeMillis();
-		if (debugLogTimes.size() >= 512 && !debugLogTimes.containsKey(key))
-		{
-			debugLogTimes.clear();
-		}
-		Long previous = debugLogTimes.get(key);
-		if (previous != null && now - previous < 1000)
-		{
-			return;
-		}
-		debugLogTimes.put(key, now);
-		log.info("[Prayer Transparency] " + message, arguments);
-	}
-
 	/**
 	 * Returns the clean prayer book sprite for a head icon, or null when none
 	 * exists (e.g. curse and combined head icons), in which case the plugin
@@ -242,21 +215,13 @@ public class PrayerTransparencyPlugin extends Plugin
 		SpritePixels[] sprites = client.getSprites(client.getIndexSprites(), SpriteID.HEADICONS_PRAYER, 0);
 		if (sprites == null || icon.ordinal() >= sprites.length)
 		{
-			debugEvery("sprite-missing-" + icon, "native sprite missing: icon={}, ordinal={}, spriteCount={}",
-				icon, icon.ordinal(), sprites == null ? -1 : sprites.length);
 			return null;
 		}
 		SpritePixels sprite = sprites[icon.ordinal()];
 		if (sprite == null || sprite.getPixels() == null)
 		{
-			debugEvery("sprite-null-" + icon, "native sprite empty: icon={}, ordinal={}",
-				icon, icon.ordinal());
 			return null;
 		}
-		debugEvery("sprite-loaded-" + icon,
-			"native sprite loaded: icon={}, ordinal={}, size={}x{}, max={}x{}, offset=({},{}), pixels={}",
-			icon, icon.ordinal(), sprite.getWidth(), sprite.getHeight(), sprite.getMaxWidth(),
-			sprite.getMaxHeight(), sprite.getOffsetX(), sprite.getOffsetY(), sprite.getPixels().length);
 		return sprite;
 	}
 

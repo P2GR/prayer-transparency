@@ -160,8 +160,6 @@ class PrayerTransparencyApplyOverlay extends Overlay
 		int origBgOffset = region.getOrigBgOffset();
 		int iconOffset = region.getIconOffset();
 		int maskOffset = region.getMaskOffset();
-		int touched = 0;
-		int fringe = 0;
 
 		// Clamp the original region against the current buffer in case the canvas
 		// was resized mid-frame. The mask/icon scratch is indexed by the original
@@ -177,23 +175,14 @@ class PrayerTransparencyApplyOverlay extends Overlay
 
 		NativeIconMatcher.Match match = findNativeIcon(pixels, bufferWidth, scratch, region,
 			width, height, stride);
-		String debugKey = "match-" + region.getPlayerName() + '-' + region.getHeadIcon();
 		if (!match.isAccepted())
 		{
-			plugin.debugEvery(debugKey,
-				"match rejected: player={}, icon={}, bestTop={}, screenY={}, matches={}, changed={}, opaque={}, ratio={}%, lane=({},{} {}x{}), sprite={}x{}",
-				region.getPlayerName(), region.getHeadIcon(), match.getTop(),
-				match.getOpaque() == 0 ? -1 : region.getY() + match.getTop(), match.getMatches(), match.getChanged(),
-				match.getOpaque(), match.ratio(), region.getX(), region.getY(), width, height,
-				region.getNativeIcon().getWidth(), region.getNativeIcon().getHeight());
 			return null;
 		}
 		int nativeTop = match.getTop();
 		net.runelite.api.SpritePixels nativeIcon = region.getNativeIcon();
 		int nativeWidth = nativeIcon.getWidth();
 		int nativeHeight = nativeIcon.getHeight();
-		int expectedSourceX = x0 - (region.getIconX() - nativeIcon.getMaxWidth() / 2
-			+ nativeIcon.getOffsetX());
 		int nativeSourceX = match.getSourceX();
 		int[] nativePixels = nativeIcon.getPixels();
 
@@ -218,7 +207,6 @@ class PrayerTransparencyApplyOverlay extends Overlay
 				{
 					scratch[maskOffset + slot] = 1;
 					scratch[iconOffset + slot] = nativePixel & 0xFFFFFF;
-					touched++;
 				}
 				else if (nativePixel == 0
 					&& NativeIconMatcher.isNativeFringePixel(current, background, nativePixels,
@@ -227,17 +215,9 @@ class PrayerTransparencyApplyOverlay extends Overlay
 					// Remove renderer fringe, but never redraw it at the shifted target.
 					scratch[maskOffset + slot] = 1;
 					scratch[iconOffset + slot] = ERASE_ONLY_PIXEL;
-					touched++;
-					fringe++;
 				}
 			}
 		}
-
-		plugin.debugEvery(debugKey,
-			"match accepted: player={}, icon={}, top={}, screenY={}, xShift={}, matches={}, changed={}, opaque={}, ratio={}%, touched={}, fringe={}",
-			region.getPlayerName(), region.getHeadIcon(), nativeTop, region.getY() + nativeTop,
-			expectedSourceX - nativeSourceX, match.getMatches(), match.getChanged(),
-			match.getOpaque(), match.ratio(), touched, fringe);
 
 		return new PreparedRegion(region, width, height, stride, nativeTop, nativeSourceX);
 	}

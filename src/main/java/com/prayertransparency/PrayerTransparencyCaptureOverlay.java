@@ -221,10 +221,6 @@ class PrayerTransparencyCaptureOverlay extends Overlay
 					? plugin.getCleanIcon(player.getOverheadIcon())
 					: null));
 			scratchOffset += regionSize * 5;
-			plugin.debugEvery("capture-" + player.getName(),
-				"capture: player={}, icon={}, logicalHeight={}, anchor=({},{}), lane=({},{} {}x{}), target=({},{}), verticalOffset={}, gpu={}",
-				player.getName(), player.getOverheadIcon(), player.getLogicalHeight(), canvas.getX(), canvas.getY(),
-				x0, y0, regionWidth, regionHeight, targetX, targetY, verticalOffset, client.isGpu());
 		}
 
 		return null;
